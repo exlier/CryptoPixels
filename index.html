@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Million Dollar Homepage</title>
-    <!-- Web3 and Supabase Dependencies Hosted via CDN -->
+    <!-- Fixed Production CDN Dependencies -->
     <script src="https://unpkg.com" crossorigin="anonymous"></script>
     <script src="https://unpkg.com" crossorigin="anonymous"></script>
     <style>
@@ -12,43 +12,46 @@
         header { padding: 20px; background: #1e293b; border-bottom: 2px solid #334155; }
         h1 { margin: 0; color: #38bdf8; font-size: 2.5rem; }
         .stats { margin-top: 10px; font-size: 1.1rem; color: #94a3b8; }
-        canvas { border: 4px solid #334155; background: #000; margin: 30px auto; display: block; box-shadow: 0 10px 25px rgba(0,0,0,0.5); cursor: crosshair; }
-        .modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #1e293b; padding: 30px; border-radius: 12px; border: 2px solid #38bdf8; box-shadow: 0 20px 50px rgba(0,0,0,0.7); z-index: 10; width: 320px; }
+        #canvas-container { width: 1000px; height: 1000px; margin: 30px auto; position: relative; }
+        canvas { border: 4px solid #334155; background: #000; display: block; box-shadow: 0 10px 25px rgba(0,0,0,0.5); cursor: crosshair; }
+        .modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #1e293b; padding: 30px; border-radius: 12px; border: 2px solid #38bdf8; box-shadow: 0 20px 50px rgba(0,0,0,0.7); z-index: 100; width: 320px; }
         .modal h3 { margin-top: 0; color: #38bdf8; }
         .modal input { width: 90%; padding: 10px; margin: 10px 0; background: #0f172a; border: 1px solid #475569; color: #fff; border-radius: 6px; }
         .modal button { width: 100%; padding: 12px; background: #38bdf8; border: none; color: #0f172a; font-weight: bold; font-size: 1rem; border-radius: 6px; cursor: pointer; transition: 0.2s; }
         .modal button:hover { background: #0ea5e9; }
-        .overlay { display: none; position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index: 5; }
+        .overlay { display: none; position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index: 50; }
     </style>
 </head>
 <body>
 
     <header>
         <h1>Crypto Million Dollar Homepage</h1>
-        <div class="stats">1 Pixel = 0.00001 ETH (Base Network) | Click any 10x10 block to buy!</div>
+        <div class="stats">1 Pixel Block = 0.001 ETH (Base Network) | Click any 10x10 block to buy!</div>
     </header>
 
-    <!-- 1000x1000 Interaction Canvas -->
-    <canvas id="gridCanvas" width="1000" height="1000"></canvas>
+    <!-- 1000x1000 Interaction Canvas Container -->
+    <div id="canvas-container">
+        <canvas id="gridCanvas" width="1000" height="1000"></canvas>
+    </div>
 
     <!-- Overlay and Checkout Modal -->
     <div class="overlay" id="overlay"></div>
     <div class="modal" id="buyModal">
         <h3>Buy Pixel Block</h3>
         <p id="blockCoords">Selected Block: (X, Y)</p>
-        <p>Price: <strong>0.001 ETH</strong> (~$3.00)</p>
+        <p>Price: <strong>0.001 ETH</strong></p>
         <input type="text" id="imgUrl" placeholder="10x10 Image Link (PNG/JPG)">
         <input type="text" id="linkUrl" placeholder="Your Website Link (https://...)">
         <button id="payBtn">Pay with Crypto Wallet</button>
     </div>
 
     <script>
-        // 🔒 Pre-configured production parameters 
-        const SUPABASE_URL = "https://supabase.co"; 
+        // 🔒 Production Parameters Loaded Successfully
+        const SUPABASE_URL = "https://kvtdelsdifkerfepvkvn.supabase.co"; 
         const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt2dGRlbHNkaWZrZXJmZXB2a3ZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2OTE0MjUsImV4cCI6MjA5NTI2NzQyNX0.CAZXKUsP47fDiVxiH830Z3nXCFRb4m6XLtP-KX5bE5o"; 
         const MY_WALLET = "0x69142E445C25e4619f49E0DCEac86300f146B624"; 
 
-        // Initialize connection
+        // Initialize production connection
         const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
         const canvas = document.getElementById('gridCanvas');
@@ -60,12 +63,12 @@
 
         let selectedX = 0;
         let selectedY = 0;
+        const imageCache = {}; // Client-side execution memory optimization
 
-        // 1. Render Background Matrix & Draw Occupied Blocks
+        // 1. Optimized High-Speed Render Matrix Loop
         async function fetchAndDrawPixels() {
             const { data: pixels, error } = await supabaseClient.from('pixels').select('*');
             
-            // Draw clean dark background mesh
             ctx.fillStyle = '#111';
             ctx.fillRect(0, 0, 1000, 1000);
             ctx.strokeStyle = '#222';
@@ -76,17 +79,22 @@
 
             if (pixels) {
                 pixels.forEach(p => {
-                    const img = new Image();
-                    img.crossOrigin = "anonymous";
-                    img.src = p.image_url;
-                    img.onload = () => {
-                        ctx.drawImage(img, p.x, p.y, p.width, p.height);
-                    };
+                    if (imageCache[p.image_url]) {
+                        ctx.drawImage(imageCache[p.image_url], p.x, p.y, p.width, p.height);
+                    } else {
+                        const img = new Image();
+                        img.crossOrigin = "anonymous";
+                        img.src = p.image_url;
+                        img.onload = () => {
+                            imageCache[p.image_url] = img;
+                            ctx.drawImage(img, p.x, p.y, p.width, p.height);
+                        };
+                    }
                 });
             }
         }
 
-        // 2. Open Checkout Screen on Click
+        // 2. Exact Click Coordinate Target Tracker
         canvas.addEventListener('click', (e) => {
             const rect = canvas.getBoundingClientRect();
             selectedX = Math.floor((e.clientX - rect.left) / 10) * 10;
@@ -97,19 +105,18 @@
             buyModal.style.display = 'block';
         });
 
-        // Close UI if clicking boundary overlay
         overlay.addEventListener('click', () => {
             overlay.style.display = 'none';
             buyModal.style.display = 'none';
         });
 
-        // 3. Fire Direct Wallet Transfer & Trigger Secure Database Function
+        // 3. Automated Base Network Switch & Secure Contract Handler Call
         payBtn.addEventListener('click', async () => {
             const imgUrl = document.getElementById('imgUrl').value;
             const linkUrl = document.getElementById('linkUrl').value;
 
             if(!imgUrl || !linkUrl) return alert("Please fill out both fields!");
-            if(!window.ethereum) return alert("Please switch to a Web3 enabled browser extension!");
+            if(!window.ethereum) return alert("Please run inside a wallet-integrated ecosystem!");
 
             try {
                 payBtn.innerText = "Connecting Wallet...";
@@ -117,16 +124,37 @@
                 await provider.send("eth_requestAccounts", []);
                 const signer = provider.getSigner();
 
+                // Direct Auto-Switch Request to Base Chain ID (8453)
+                const BASE_CHAIN_ID = "0x2105"; 
+                try {
+                    await window.ethereum.request({
+                        method: 'wallet_switchEthereumChain',
+                        params: [{ chainId: BASE_CHAIN_ID }],
+                    });
+                } catch (switchError) {
+                    if (switchError.code === 4902) {
+                        await window.ethereum.request({
+                            method: 'wallet_addEthereumChain',
+                            params: [{
+                                chainId: BASE_CHAIN_ID,
+                                chainName: 'Base Mainnet',
+                                nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+                                rpcUrls: ['https://base.org'],
+                                blockExplorerUrls: ['https://basescan.org']
+                            }],
+                        });
+                    } else { throw switchError; }
+                }
+
                 payBtn.innerText = "Awaiting Tx Confirmation...";
                 const tx = await signer.sendTransaction({
                     to: MY_WALLET,
-                    value: ethers.utils.parseEther("0.001") // Custom price: 0.001 ETH
+                    value: ethers.utils.parseEther("0.001") 
                 });
 
                 payBtn.innerText = "Indexing Blockchain Ref...";
                 await tx.wait(); 
 
-                // Call the secure RPC function we built in the SQL editor
                 const { error } = await supabaseClient.rpc('buy_pixel_secure', {
                     _x: selectedX,
                     _y: selectedY,
@@ -152,7 +180,7 @@
             }
         });
 
-        // Redirect on Double Click
+        // Double Click Redirection Logic
         canvas.addEventListener('dblclick', async (e) => {
             const rect = canvas.getBoundingClientRect();
             const clickX = Math.floor((e.clientX - rect.left) / 10) * 10;
@@ -164,7 +192,6 @@
             }
         });
 
-        // Render Canvas on boot
         fetchAndDrawPixels();
     </script>
 </body>
