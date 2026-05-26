@@ -323,10 +323,10 @@ async function handlePurchase() {
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
         // Prepare parallel X and Y arrays and call the flexible RPC once
-        const xArrayData = selectedPixels.map((p) => Number(p.x));
-        const yArrayData = selectedPixels.map((p) => Number(p.y));
+        const xArrayData = selectedPixels.map((p) => p.x);
+        const yArrayData = selectedPixels.map((p) => p.y);
 
-        const { error: rpcError } = await supabaseClient.rpc('buy_pixel_secure_flexible', {
+        const { error } = await supabaseClient.rpc('buy_pixel_secure_flexible', {
             _x_array: xArrayData,
             _y_array: yArrayData,
             _image_url: imageUrl,
@@ -334,14 +334,15 @@ async function handlePurchase() {
             _tx_hash: tx.hash,
         });
 
-        if (rpcError) {
-            console.error('Supabase RPC failed:', rpcError);
+        if (error) {
+            console.error('Supabase RPC failed:', error);
             showToast('Purchase saved locally, but failed to finalize on the server.', 'error');
             return;
         }
 
         showToast('Pixels purchased successfully! Refreshing canvas.', 'info');
         setTimeout(() => {
+            tempSelection.clear();
             closeModal();
             selectedPixels = [];
             fetchAndDrawPixels();
