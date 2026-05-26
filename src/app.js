@@ -22,11 +22,16 @@ const imgUrlInput = document.getElementById('imgUrl');
 const linkUrlInput = document.getElementById('linkUrl');
 const payBtn = document.getElementById('payBtn');
 const toast = document.getElementById('toast');
+const pixelCountEl = document.getElementById('pixelCount');
+const totalPriceEl = document.getElementById('totalPrice');
 
-let selectedX = 0;
-let selectedY = 0;
 let isSubmitting = false;
 const imageCache = new Map();
+let selectedSet = new Set();
+let tempSelection = new Set();
+let isDragging = false;
+let dragStart = null;
+let cachedPixels = [];
 
 function showToast(message, type = 'info') {
     toast.textContent = message;
@@ -45,12 +50,17 @@ function mapEventToCanvasCoordinates(event) {
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    const rawX = event.clientX - rect.left;
-    const rawY = event.clientY - rect.top;
-    return {
-        x: Math.floor(clamp(rawX * scaleX, 0, canvas.width - 1) / CELL_SIZE) * CELL_SIZE,
-        y: Math.floor(clamp(rawY * scaleY, 0, canvas.height - 1) / CELL_SIZE) * CELL_SIZE,
-    };
+    const clientX = (event.touches ? event.touches[0].clientX : event.clientX) || event.clientX;
+    const clientY = (event.touches ? event.touches[0].clientY : event.clientY) || event.clientY;
+    const rawX = clientX - rect.left;
+    const rawY = clientY - rect.top;
+    const cellX = Math.floor(clamp(rawX * scaleX, 0, canvas.width - 1) / CELL_SIZE);
+    const cellY = Math.floor(clamp(rawY * scaleY, 0, canvas.height - 1) / CELL_SIZE);
+    return { x: cellX * CELL_SIZE, y: cellY * CELL_SIZE, cellX, cellY };
+}
+
+function cellKey(x, y) {
+    return `${x},${y}`;
 }
 
 function validateUrl(value, allowedProtocols) {
@@ -63,18 +73,14 @@ function validateUrl(value, allowedProtocols) {
 }
 
 function validateImageUrl(value) {
-    if (!validateUrl(value, ['https:'])) {
-        return false;
-    }
+    if (!validateUrl(value, ['https:'])) return false;
     const parsed = new URL(value.trim());
     const path = parsed.pathname.toLowerCase();
     return ALLOWED_IMAGE_EXTENSIONS.some((ext) => path.endsWith(ext));
 }
 
 function validateLinkUrl(value) {
-    if (!validateUrl(value, ALLOWED_LINK_PROTOCOLS)) {
-        return false;
-    }
+    if (!validateUrl(value, ALLOWED_LINK_PROTOCOLS)) return false;
     const parsed = new URL(value.trim());
     return parsed.protocol === 'https:' || parsed.protocol === 'http:';
 }
@@ -162,6 +168,26 @@ function drawPixelItem(pixel) {
         });
 }
 
+function drawSelections() {
+    // preview (temp) first
+    ctx.save();
+    tempSelection.forEach((k) => {
+        const [x, y] = k.split(',').map(Number);
+        ctx.fillStyle = 'rgba(56,189,248,0.25)';
+        ctx.fillRect(x + 1, y + 1, CELL_SIZE - 2, CELL_SIZE - 2);
+    });
+
+    // confirmed selections
+    selectedSet.forEach((k) => {
+        const [x, y] = k.split(',').map(Number);
+        ctx.fillStyle = 'rgba(56,189,248,0.4)';
+        ctx.fillRect(x + 1, y + 1, CELL_SIZE - 2, CELL_SIZE - 2);
+        ctx.strokeStyle = 'rgba(2,6,23,0.6)';
+        ctx.strokeRect(x + 1, y + 1, CELL_SIZE - 2, CELL_SIZE - 2);
+    });
+    ctx.restore();
+}
+
 async function fetchAndDrawPixels() {
     drawGrid();
 
@@ -179,7 +205,9 @@ async function fetchAndDrawPixels() {
         return;
     }
 
-    pixels?.forEach((pixel) => drawPixelItem(pixel));
+    cachedPixels = pixels || [];
+    cachedPixels.forEach((pixel) => drawPixelItem(pixel));
+    drawSelections();
 }
 
 async function getPixelRecord(x, y) {
@@ -200,13 +228,18 @@ async function getPixelRecord(x, y) {
     return data;
 }
 
-async function handleCanvasClick(event) {
-    const coordinates = mapEventToCanvasCoordinates(event);
-    selectedX = coordinates.x;
-    selectedY = coordinates.y;
-    blockCoords.innerText = `Selected Block: X=${selectedX}, Y=${selectedY}`;
-    resetModal();
-    openModal();
+function updateSelectionUI() {
+    const totalPixels = selectedSet.size;
+    blockCoords.innerText = `Selected Pixels: ${totalPixels}`;
+    if (pixelCountEl) pixelCountEl.innerText = String(totalPixels);
+    const totalEth = (totalPixels * Number(PIXEL_PRICE_ETH)).toFixed(6).replace(/\.0+$/, '.0');
+    if (totalPriceEl) totalPriceEl.innerText = `${totalEth} ETH`;
+
+    if (totalPixels < 100) {
+        payBtn.disabled = true;
+    } else {
+        payBtn.disabled = false;
+    }
 }
 
 function resetModal() {
@@ -214,10 +247,17 @@ function resetModal() {
         input.value = '';
     });
     setButtonState(false);
+    updateSelectionUI();
 }
 
 async function handlePurchase() {
     if (isSubmitting) return;
+
+    const totalPixels = selectedSet.size;
+    if (totalPixels < 100) {
+        showToast('Minimum order size is 100 pixels (0.1 ETH)', 'error');
+        return;
+    }
 
     const imageUrl = imgUrlInput.value.trim();
     const linkUrl = linkUrlInput.value.trim();
@@ -266,34 +306,50 @@ async function handlePurchase() {
         }
 
         payBtn.innerText = 'Awaiting transaction...';
+
+        // Calculate total value in wei using BigNumber multiply
+        const perPixelWei = ethers.utils.parseEther(PIXEL_PRICE_ETH);
+        const totalValue = perPixelWei.mul(totalPixels);
+
         const tx = await signer.sendTransaction({
             to: PAYMENT_RECEIVER,
-            value: ethers.utils.parseEther(PIXEL_PRICE_ETH),
+            value: totalValue,
         });
 
         payBtn.innerText = 'Waiting for confirmation...';
         await tx.wait();
 
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        const { error } = await supabaseClient.rpc('buy_pixel_secure', {
-            _x: selectedX,
-            _y: selectedY,
-            _width: CELL_SIZE,
-            _height: CELL_SIZE,
-            _image_url: imageUrl,
-            _link_url: linkUrl,
-            _tx_hash: tx.hash,
+
+        // Loop RPC insertion for each pixel coordinate
+        const insertPromises = [];
+        selectedSet.forEach((k) => {
+            const [x, y] = k.split(',').map(Number);
+            insertPromises.push(
+                supabaseClient.rpc('buy_pixel_secure', {
+                    _x: x,
+                    _y: y,
+                    _width: CELL_SIZE,
+                    _height: CELL_SIZE,
+                    _image_url: imageUrl,
+                    _link_url: linkUrl,
+                    _tx_hash: tx.hash,
+                })
+            );
         });
 
-        if (error) {
-            console.error('Supabase RPC failed:', error);
+        const insertResults = await Promise.all(insertPromises);
+        const rpcError = insertResults.find((r) => r.error);
+        if (rpcError) {
+            console.error('Supabase RPC failed:', rpcError);
             showToast('Purchase saved locally, but failed to finalize on the server.', 'error');
             return;
         }
 
-        showToast('Pixel block purchased successfully! Refreshing canvas.', 'info');
+        showToast('Pixels purchased successfully! Refreshing canvas.', 'info');
         setTimeout(() => {
             closeModal();
+            selectedSet.clear();
             fetchAndDrawPixels();
         }, 800);
     } catch (error) {
@@ -305,8 +361,8 @@ async function handlePurchase() {
 }
 
 async function handleCanvasDoubleClick(event) {
-    const coordinates = mapEventToCanvasCoordinates(event);
-    const record = await getPixelRecord(coordinates.x, coordinates.y);
+    const coords = mapEventToCanvasCoordinates(event);
+    const record = await getPixelRecord(coords.x, coords.y);
 
     if (record?.link_url) {
         try {
@@ -318,8 +374,73 @@ async function handleCanvasDoubleClick(event) {
     }
 }
 
+function previewSelectionBetween(start, end) {
+    tempSelection.clear();
+    const startX = Math.min(start.cellX, end.cellX);
+    const endX = Math.max(start.cellX, end.cellX);
+    const startY = Math.min(start.cellY, end.cellY);
+    const endY = Math.max(start.cellY, end.cellY);
+    for (let cx = startX; cx <= endX; cx++) {
+        for (let cy = startY; cy <= endY; cy++) {
+            tempSelection.add(cellKey(cx * CELL_SIZE, cy * CELL_SIZE));
+        }
+    }
+}
+
+function commitTempSelectionToggle() {
+    tempSelection.forEach((k) => {
+        if (selectedSet.has(k)) selectedSet.delete(k);
+        else selectedSet.add(k);
+    });
+    tempSelection.clear();
+}
+
+function renderCanvasFromCache() {
+    drawGrid();
+    cachedPixels.forEach((pixel) => drawPixelItem(pixel));
+    drawSelections();
+}
+
 function attachEvents() {
-    canvas.addEventListener('click', handleCanvasClick);
+    // pointer events for drag selection
+    canvas.addEventListener('pointerdown', (e) => {
+        canvas.setPointerCapture(e.pointerId);
+        isDragging = true;
+        dragStart = mapEventToCanvasCoordinates(e);
+        previewSelectionBetween(dragStart, dragStart);
+        renderCanvasFromCache();
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+        if (!isDragging) return;
+        const coords = mapEventToCanvasCoordinates(e);
+        previewSelectionBetween(dragStart, coords);
+        renderCanvasFromCache();
+    });
+
+    canvas.addEventListener('pointerup', (e) => {
+        if (!isDragging) return;
+        const coords = mapEventToCanvasCoordinates(e);
+        previewSelectionBetween(dragStart, coords);
+        commitTempSelectionToggle();
+        isDragging = false;
+        dragStart = null;
+        renderCanvasFromCache();
+        updateSelectionUI();
+        // open modal on selection change
+        resetModal();
+        openModal();
+        if (selectedSet.size < 100) {
+            showToast('Minimum order size is 100 pixels (0.1 ETH)', 'error');
+        }
+    });
+
+    canvas.addEventListener('pointercancel', () => {
+        isDragging = false;
+        tempSelection.clear();
+        renderCanvasFromCache();
+    });
+
     canvas.addEventListener('dblclick', handleCanvasDoubleClick);
     overlay.addEventListener('click', closeModal);
     payBtn.addEventListener('click', handlePurchase);
@@ -338,6 +459,7 @@ function initializePage() {
     drawGrid();
     attachEvents();
     fetchAndDrawPixels();
+    updateSelectionUI();
 }
 
 initializePage();

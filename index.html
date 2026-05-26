@@ -9,8 +9,26 @@
 <body>
     <header>
         <h1>Crypto Million Dollar Homepage</h1>
-        <div class="stats">1 Pixel Block = 0.001 ETH (Base Mainnet) | Click any 10x10 block to buy</div>
+        <div class="stats">Base Price: 0.001 ETH per Pixel</div>
     </header>
+
+    <div class="trust-card">
+        <h2>🛡️ Why Trust Us & How to Buy</h2>
+        <div class="trust-columns">
+            <div class="trust-column">
+                <h4>Trust</h4>
+                <p>Our system is 100% decentralized, non-custodial, and zero-KYC. We do not use third-party payment gateways or processors — transactions go wallet-to-wallet on-chain via the Base network. If a block isn't assigned, our security layers will block database insertion to prevent accidental claims.</p>
+            </div>
+            <div class="trust-column">
+                <h4>How to Buy</h4>
+                <ol>
+                    <li>Click and drag or tap multiple pixels on the grid to highlight your custom ad size.</li>
+                    <li>Input your image URL and target redirect link.</li>
+                    <li>Confirm the automatically calculated total invoice inside MetaMask.</li>
+                </ol>
+            </div>
+        </div>
+    </div>
 
     <div id="canvas-container">
         <canvas id="gridCanvas" width="1000" height="1000" aria-label="Pixel purchase canvas"></canvas>
@@ -20,8 +38,9 @@
 
     <div class="modal" id="buyModal">
         <h3>Buy Pixel Block</h3>
-        <p id="blockCoords">Selected Block: (X, Y)</p>
-        <p>Price: <strong>0.001 ETH</strong></p>
+        <p id="blockCoords">Selected Pixels: 0</p>
+        <p class="selection-summary">Selected: <span id="pixelCount">0</span> pixels | Total: <strong id="totalPrice">0 ETH</strong></p>
+        <p style="margin-top:6px; color:#94a3b8;">Price per pixel: <strong>0.001 ETH</strong></p>
         <input type="text" id="imgUrl" placeholder="10x10 Image Link (HTTPS PNG/JPG)" autocomplete="off">
         <input type="text" id="linkUrl" placeholder="Your Website Link (https://...)" autocomplete="off">
         <button id="payBtn" type="button">Pay with Crypto Wallet</button>
