@@ -1,9 +1,6 @@
 import { APP_CONFIG } from './config.js';
 
 const {
-    SUPABASE_URL,
-    SUPABASE_ANON_KEY,
-    PAYMENT_RECEIVER,
     PIXEL_PRICE_ETH,
     GRID_SIZE,
     CELL_SIZE,
@@ -25,13 +22,14 @@ const toast = document.getElementById('toast');
 const pixelCountEl = document.getElementById('pixelCount');
 const totalPriceEl = document.getElementById('totalPrice');
 
-let isSubmitting = false;
+let isSubmitting = false; // prevents double-submit and UI races
 const imageCache = new Map();
 let selectedPixels = []; // array of {x, y}
 let tempSelection = new Set();
 let isDragging = false;
 let dragStart = null;
 let cachedPixels = [];
+let pendingRaf = null; // for throttling pointermove
 
 function showToast(message, type = 'info') {
     toast.textContent = message;
@@ -73,8 +71,10 @@ function validateUrl(value, allowedProtocols) {
 }
 
 function validateImageUrl(value) {
-    if (!validateUrl(value, ['https:'])) return false;
-    const parsed = new URL(value.trim());
+    const v = value.trim();
+    if (v.startsWith('data:')) return v.startsWith('data:image/');
+    if (!validateUrl(v, ['https:'])) return false;
+    const parsed = new URL(v);
     const path = parsed.pathname.toLowerCase();
     return ALLOWED_IMAGE_EXTENSIONS.some((ext) => path.endsWith(ext));
 }
@@ -83,6 +83,27 @@ function validateLinkUrl(value) {
     if (!validateUrl(value, ALLOWED_LINK_PROTOCOLS)) return false;
     const parsed = new URL(value.trim());
     return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+}
+
+// Parse a decimal ETH string into wei (BigInt) without using floating-point arithmetic.
+function parseEtherToWei(ethStr) {
+    const s = String(ethStr).trim();
+    if (!/^[0-9]+(\.[0-9]+)?$/.test(s)) throw new Error('Invalid ETH amount');
+    const [whole, frac = ''] = s.split('.');
+    const fracPadded = (frac + '0'.repeat(18)).slice(0, 18);
+    const combined = whole + fracPadded;
+    return BigInt(combined);
+}
+
+// Format wei (BigInt) to a short ETH string for UI (up to 6 fractional digits).
+function formatWeiToEth(wei) {
+    const WEI = 10n ** 18n;
+    const whole = wei / WEI;
+    const frac = wei % WEI;
+    if (frac === 0n) return whole.toString();
+    const fracFull = frac.toString().padStart(18, '0');
+    const frac6 = fracFull.slice(0, 6).replace(/0+$/, '');
+    return frac6 ? `${whole.toString()}.${frac6}` : whole.toString();
 }
 
 function openModal() {
@@ -133,11 +154,21 @@ function drawPixelPlaceholder(x, y, width = CELL_SIZE, height = CELL_SIZE) {
 
 function loadRemoteImage(src) {
     return new Promise((resolve, reject) => {
-        const image = new Image();
-        image.crossOrigin = 'anonymous';
-        image.onload = () => resolve(image);
-        image.onerror = () => reject(new Error('Image load failed'));
-        image.src = src;
+        try {
+            const image = new Image();
+            // Only allow data: or same-origin images to avoid canvas tainting and SSRF/exfil
+            const url = new URL(src, window.location.href);
+            if (src.startsWith('data:') || url.origin === window.location.origin) {
+                image.crossOrigin = 'anonymous';
+                image.onload = () => resolve(image);
+                image.onerror = () => reject(new Error('Image load failed'));
+                image.src = src;
+            } else {
+                reject(new Error('External images are not allowed to draw to canvas'));
+            }
+        } catch (e) {
+            reject(e);
+        }
     });
 }
 
@@ -151,21 +182,24 @@ function drawPixelItem(pixel) {
         drawPixelPlaceholder(x, y, width, height);
         return;
     }
+    try {
+        if (imageCache.has(pixel.image_url)) {
+            ctx.drawImage(imageCache.get(pixel.image_url), x, y, width, height);
+            return;
+        }
 
-    if (imageCache.has(pixel.image_url)) {
-        ctx.drawImage(imageCache.get(pixel.image_url), x, y, width, height);
-        return;
+        loadRemoteImage(pixel.image_url)
+            .then((image) => {
+                imageCache.set(pixel.image_url, image);
+                ctx.drawImage(image, x, y, width, height);
+            })
+            .catch((error) => {
+                console.warn('Failed to load pixel image:', pixel.image_url, error);
+                drawPixelPlaceholder(x, y, width, height);
+            });
+    } catch (err) {
+        drawPixelPlaceholder(x, y, width, height);
     }
-
-    loadRemoteImage(pixel.image_url)
-        .then((image) => {
-            imageCache.set(pixel.image_url, image);
-            ctx.drawImage(image, x, y, width, height);
-        })
-        .catch((error) => {
-            console.warn('Failed to load pixel image:', pixel.image_url, error);
-            drawPixelPlaceholder(x, y, width, height);
-        });
 }
 
 function drawSelections() {
@@ -191,56 +225,52 @@ function drawSelections() {
 
 async function fetchAndDrawPixels() {
     drawGrid();
-
-    if (!window.supabase) {
-        showToast('Supabase client not loaded. Check your script tags.', 'error');
-        return;
-    }
-
-    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    const { data: pixels, error } = await supabaseClient.from(PIXELS_TABLE).select('*');
-
-    if (error) {
-        console.error('Failed to fetch pixels:', error);
+    try {
+        const res = await fetch('/api/pixels');
+        if (!res.ok) throw new Error('Failed to load pixels');
+        const pixels = await res.json();
+        cachedPixels = Array.isArray(pixels) ? pixels : [];
+        cachedPixels.forEach((pixel) => drawPixelItem(pixel));
+        drawSelections();
+    } catch (err) {
+        console.error('Failed to fetch pixels:', err);
         showToast('Unable to load pixel map. Please refresh the page.', 'error');
-        return;
     }
-
-    cachedPixels = pixels || [];
-    cachedPixels.forEach((pixel) => drawPixelItem(pixel));
-    drawSelections();
 }
 
 async function getPixelRecord(x, y) {
-    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    const { data, error } = await supabaseClient
-        .from(PIXELS_TABLE)
-        .select('link_url')
-        .eq('x', x)
-        .eq('y', y)
-        .single();
-
-    if (error && error.code !== 'PGRST116') {
-        console.error('Error loading pixel record:', error);
+    try {
+        const res = await fetch(`/api/pixel?x=${encodeURIComponent(x)}&y=${encodeURIComponent(y)}`);
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (err) {
+        console.error('Error loading pixel record:', err);
         showToast('Error checking the selected block. Try again later.', 'error');
         return null;
     }
-
-    return data;
 }
 
 function updateSelectionUI() {
     const totalPixels = selectedPixels.length;
     blockCoords.innerText = `Selected Pixels: ${totalPixels}`;
     if (pixelCountEl) pixelCountEl.innerText = String(totalPixels);
-    const totalEth = (totalPixels * Number(PIXEL_PRICE_ETH)).toFixed(6).replace(/\.0+$/, '.0');
-    if (totalPriceEl) totalPriceEl.innerText = `${totalEth} ETH`;
-
-    if (totalPixels < 100) {
-        payBtn.disabled = true;
-    } else {
-        payBtn.disabled = false;
+    // Use integer-safe arithmetic for ETH pricing
+    try {
+        const pricePerPixelWei = parseEtherToWei(PIXEL_PRICE_ETH);
+        const totalWei = pricePerPixelWei * BigInt(totalPixels || 0);
+        const display = formatWeiToEth(totalWei);
+        if (totalPriceEl) totalPriceEl.innerText = `${display} ETH`;
+    } catch (e) {
+        if (totalPriceEl) totalPriceEl.innerText = '0 ETH';
     }
+
+    // Respect submission state to avoid race/double-submit
+    if (isSubmitting) {
+        payBtn.disabled = true;
+        return;
+    }
+
+    payBtn.disabled = totalPixels < 100;
 }
 
 function resetModal() {
@@ -269,7 +299,7 @@ async function handlePurchase() {
     }
 
     if (!validateImageUrl(imageUrl)) {
-        showToast('Enter a valid HTTPS image URL ending with PNG/JPG/GIF/SVG/WEBP.', 'error');
+        showToast('Enter a valid image (data: or HTTPS) with allowed extension.', 'error');
         return;
     }
 
@@ -284,11 +314,26 @@ async function handlePurchase() {
     }
 
     setButtonState(true);
+    isSubmitting = true;
 
     try {
-        const provider = new ethers.providers.Web3Provider(window.ethereum);
-        await provider.send('eth_requestAccounts', []);
-        const signer = provider.getSigner();
+        // 1) ask server to checkout/reserve pixels and return price + payment receiver
+        const checkoutResp = await fetch('/api/checkout', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ selectedPixels, imageUrl, linkUrl }),
+        });
+
+        if (!checkoutResp.ok) {
+            const err = await checkoutResp.json().catch(() => ({}));
+            throw new Error(err?.error || 'Checkout failed or pixels are unavailable');
+        }
+
+        const { priceWei, paymentReceiver, reserveToken } = await checkoutResp.json();
+
+        // 2) request accounts and switch chain if necessary
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        const from = accounts[0];
 
         try {
             await window.ethereum.request({
@@ -296,48 +341,33 @@ async function handlePurchase() {
                 params: [{ chainId: BASE_CHAIN_INFO.chainId }],
             });
         } catch (switchError) {
-            if (switchError.code === 4902) {
-                await window.ethereum.request({
-                    method: 'wallet_addEthereumChain',
-                    params: [BASE_CHAIN_INFO],
-                });
-            } else {
-                throw switchError;
+            if (switchError && switchError.code === 4902) {
+                await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [BASE_CHAIN_INFO] });
             }
         }
 
         payBtn.innerText = 'Awaiting transaction...';
 
-        // Calculate total ETH as decimal string and parse to wei for exact transfer
-        const totalEthString = (totalPixels * Number(PIXEL_PRICE_ETH)).toFixed(6);
-        const totalValue = ethers.utils.parseEther(totalEthString);
+        const valueHex = '0x' + BigInt(priceWei).toString(16);
 
-        const tx = await signer.sendTransaction({
-            to: PAYMENT_RECEIVER,
-            value: totalValue,
+        // send transaction via the user's wallet
+        const txHash = await window.ethereum.request({
+            method: 'eth_sendTransaction',
+            params: [{ from, to: paymentReceiver, value: valueHex }],
         });
 
-        payBtn.innerText = 'Waiting for confirmation...';
-        await tx.wait();
+        payBtn.innerText = 'Waiting for confirmation and server verification...';
 
-        const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-        // Prepare parallel X and Y arrays and call the flexible RPC once
-        const xArrayData = selectedPixels.map((p) => p.x);
-        const yArrayData = selectedPixels.map((p) => p.y);
-
-        const { error } = await supabaseClient.rpc('buy_pixel_secure_flexible', {
-            _x_array: xArrayData,
-            _y_array: yArrayData,
-            _image_url: imageUrl,
-            _link_url: linkUrl,
-            _tx_hash: tx.hash,
+        // 3) let the server verify the transaction and finalize the claim
+        const verifyResp = await fetch('/api/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ txHash, reserveToken }),
         });
 
-        if (error) {
-            console.error('Supabase RPC failed:', error);
-            showToast('Purchase saved locally, but failed to finalize on the server.', 'error');
-            return;
+        if (!verifyResp.ok) {
+            const err = await verifyResp.json().catch(() => ({}));
+            throw new Error(err?.error || 'Verification failed');
         }
 
         showToast('Pixels purchased successfully! Refreshing canvas.', 'info');
@@ -349,9 +379,10 @@ async function handlePurchase() {
         }, 800);
     } catch (error) {
         console.error('Purchase failed:', error);
-        showToast('Transaction failed or canceled. Try again if needed.', 'error');
+        showToast(error.message || 'Transaction failed or canceled. Try again if needed.', 'error');
     } finally {
         setButtonState(false);
+        isSubmitting = false;
     }
 }
 
@@ -413,9 +444,14 @@ function attachEvents() {
 
     canvas.addEventListener('pointermove', (e) => {
         if (!isDragging) return;
+        // throttle pointermove with requestAnimationFrame
         const coords = mapEventToCanvasCoordinates(e);
         previewSelectionBetween(dragStart, coords);
-        renderCanvasFromCache();
+        if (pendingRaf) return;
+        pendingRaf = requestAnimationFrame(() => {
+            renderCanvasFromCache();
+            pendingRaf = null;
+        });
     });
 
     canvas.addEventListener('pointerup', (e) => {

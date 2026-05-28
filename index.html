@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Million Dollar Homepage</title>
+    <!-- Content Security Policy: only allow resources from same origin and safe image sources -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline';">
     <link rel="stylesheet" href="./src/styles.css">
 </head>
 <body>
@@ -48,8 +50,7 @@
 
     <div class="toast hidden" id="toast"></div>
 
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.35.0/dist/umd/supabase.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js" crossorigin="anonymous"></script>
+    <!-- External crypto/db libraries moved to server-side. Client uses a small module only. -->
     <script type="module" src="./src/app.js"></script>
 </body>
 </html>

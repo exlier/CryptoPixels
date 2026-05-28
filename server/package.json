@@ -1,0 +1,16 @@
+{
+  "name": "cryptopixels-server",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.35.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "ethers": "^5.7.2",
+    "node-fetch": "^2.6.7"
+  }
+}
