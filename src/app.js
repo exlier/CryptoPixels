@@ -227,14 +227,35 @@ async function fetchAndDrawPixels() {
     drawGrid();
     try {
         const res = await fetch('/api/pixels');
-        if (!res.ok) throw new Error('Failed to load pixels');
+        if (!res.ok) {
+            // Network error: silently fallback to empty canvas with grid
+            console.warn('Failed to load pixels; drawing default grid.');
+            cachedPixels = [];
+            drawSelections();
+            return;
+        }
         const pixels = await res.json();
-        cachedPixels = Array.isArray(pixels) ? pixels : [];
-        cachedPixels.forEach((pixel) => drawPixelItem(pixel));
+        if (!pixels || !Array.isArray(pixels)) {
+            console.warn('Pixels response is null or not an array; using empty cache.');
+            cachedPixels = [];
+            drawSelections();
+            return;
+        }
+        cachedPixels = pixels;
+        cachedPixels.forEach((pixel) => {
+            try {
+                drawPixelItem(pixel);
+            } catch (pixelErr) {
+                console.warn('Error drawing individual pixel:', pixel, pixelErr);
+                // Continue to next pixel instead of failing entirely
+            }
+        });
         drawSelections();
     } catch (err) {
-        console.error('Failed to fetch pixels:', err);
-        showToast('Unable to load pixel map. Please refresh the page.', 'error');
+        // Network or parsing error: do not show toast, just continue with empty grid
+        console.error('Failed to fetch/parse pixels:', err);
+        cachedPixels = [];
+        drawSelections();
     }
 }
 
@@ -488,13 +509,17 @@ function attachEvents() {
 }
 
 function initializePage() {
-    if (!window.supabase || !window.ethers) {
-        showToast('Missing required blockchain libraries. Check your network or script imports.', 'error');
-    }
-
-    drawGrid();
+    // 1. Attach event listeners FIRST so canvas is interactive immediately
     attachEvents();
+    
+    // 2. Draw initial grid
+    drawGrid();
+    
+    // 3. Fetch and draw pixels asynchronously (non-blocking)
+    //    Any network errors are handled gracefully inside fetchAndDrawPixels
     fetchAndDrawPixels();
+    
+    // 4. Update UI state
     updateSelectionUI();
 }
 
