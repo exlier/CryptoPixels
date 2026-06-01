@@ -15,6 +15,7 @@ const {
   SUPABASE_SERVICE_KEY,
   PAYMENT_RECEIVER,
   BASE_RPC_URL = 'https://mainnet.base.org',
+  BASE_CHAIN_ID = '8',
   PRICE_PER_PIXEL_ETH = '0.0001',
   RESERVATION_TTL_MINUTES = '15',
 } = process.env;
@@ -193,6 +194,22 @@ app.post('/api/verify', async (req, res) => {
     const { txHash } = req.body || {};
     const reservationToken = req.body?.reservationToken || req.body?.reserveToken;
     if (!txHash || !reservationToken) return res.status(400).json({ error: 'Missing txHash or reservation token' });
+// Replay attack protection: Check if this transaction hash has already been used
+    const { data: usedTx, error: usedTxErr } = await supabase
+      .from('used_transactions')
+      .select('*')
+      .eq('tx_hash', txHash)
+      .maybeSingle();
+
+    if (usedTxErr) {
+      console.error('Used transactions lookup failed:', usedTxErr);
+      return res.status(500).json({ error: 'DB error' });
+    }
+
+    if (usedTx) {
+      console.warn(`Replay attack detected: Transaction ${txHash} has already been used`);
+      return res.status(400).json({ error: 'Transaction has already been used' });
+    }
 
     const { data: reservation, error: reservationErr } = await supabase
       .from('pixels_reservations')
@@ -228,6 +245,14 @@ app.post('/api/verify', async (req, res) => {
       return res.status(400).json({ error: 'Transaction failed' });
     }
 
+    // Verify chainId to prevent cross-chain replays
+    const network = await provider.getNetwork();
+    const expectedChainId = Number(BASE_CHAIN_ID);
+    if (network.chainId !== expectedChainId) {
+      console.warn(`Chain ID mismatch for transaction ${txHash}: expected ${expectedChainId}, got ${network.chainId}`);
+      return res.status(400).json({ error: 'Transaction is not on the correct chain' });
+    }
+
     const txValue = BigInt(tx.value.toString());
     const expectedValue = BigInt(reservation.expected_total_wei);
     if (txValue !== expectedValue) {
@@ -255,6 +280,23 @@ app.post('/api/verify', async (req, res) => {
     const createdAt = new Date(reservation.created_at);
     if (txTimestamp < createdAt || txTimestamp > expiresAt) {
       console.warn(`Transaction timestamp outside reservation window for ${reservationToken}: created ${createdAt.toISOString()}, tx ${txTimestamp.toISOString()}, expires ${expiresAt.toISOString()}`);
+      return res.status(400).json({ error: 'Transaction not valid for this reservation' });
+    }
+
+    // Store the used transaction hash to prevent replays
+    const { error: storeErr } = await supabase
+      .from('used_transactions')
+      .insert([
+        {
+          tx_hash: txHash,
+          chain_id: network.chainId,
+          verified_at: new Date().toISOString(),
+        },
+      ]);
+
+    if (storeErr) {
+      console.error('Failed to store used transaction hash:', storeErr);
+      return res.status(500).json({ error: 'Failed to store transaction recordToken}: created ${createdAt.toISOString()}, tx ${txTimestamp.toISOString()}, expires ${expiresAt.toISOString()}`);
       return res.status(400).json({ error: 'Transaction not valid for this reservation' });
     }
 
