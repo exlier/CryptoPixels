@@ -3,14 +3,72 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 const dns = require('dns').promises;
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
-const { logger, logPaymentAttempt, logSecurityEvent } = require('./logger');
+const { logger, logPaymentAttempt, logSecurityEvent, logRateLimitWarning } = require('./logger');
 const { validateImageUrl, validateLinkUrl } = require('./urlSanitizer');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+// Rate limiters
+const readLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 100, // 100 requests per minute
+  message: 'Too many read requests, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    // Log rate limit hits
+    return false;
+  },
+  handler: (req, res) => {
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+                     req.connection.remoteAddress || 
+                     req.socket.remoteAddress || 
+                     'unknown';
+    logRateLimitWarning(clientIp, {
+      endpoint: req.path,
+      method: 'GET',
+      limit: 100,
+      windowMs: 60000,
+    });
+    res.status(429).json({
+      error: 'Too many read requests',
+      retryAfter: 60,
+    });
+  },
+});
+
+const writeLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 requests per minute
+  message: 'Too many write requests, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    // Log rate limit hits
+    return false;
+  },
+  handler: (req, res) => {
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+                     req.connection.remoteAddress || 
+                     req.socket.remoteAddress || 
+                     'unknown';
+    logRateLimitWarning(clientIp, {
+      endpoint: req.path,
+      method: 'POST',
+      limit: 10,
+      windowMs: 60000,
+    });
+    res.status(429).json({
+      error: 'Too many write requests',
+      retryAfter: 60,
+    });
+  },
+});
 
 const {
   SUPABASE_URL,
@@ -58,7 +116,7 @@ async function releaseExpiredReservation(reservationToken) {
   }
 }
 
-app.get('/api/pixels', async (req, res) => {
+app.get('/api/pixels', readLimiter, async (req, res) => {
   try {
     const { data, error } = await supabase.from('pixels').select('*');
     if (error) return res.status(500).json({ error: 'DB error' });
@@ -69,7 +127,7 @@ app.get('/api/pixels', async (req, res) => {
   }
 });
 
-app.get('/api/pixel', async (req, res) => {
+app.get('/api/pixel', readLimiter, async (req, res) => {
   const { x, y } = req.query;
   if (x == null || y == null) return res.status(400).json({ error: 'Missing x or y' });
   try {
@@ -82,7 +140,7 @@ app.get('/api/pixel', async (req, res) => {
   }
 });
 
-app.post('/api/checkout', async (req, res) => {
+app.post('/api/checkout', writeLimiter, async (req, res) => {
   try {
     const { selectedPixels, imageUrl, linkUrl } = req.body || {};
     
@@ -249,7 +307,7 @@ app.post('/api/checkout', async (req, res) => {
   }
 });
 
-app.post('/api/verify', async (req, res) => {
+app.post('/api/verify', writeLimiter, async (req, res) => {
   try {
     const { txHash } = req.body || {};
     const reservationToken = req.body?.reservationToken || req.body?.reserveToken;
