@@ -5,6 +5,8 @@ const dns = require('dns').promises;
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
+const { logger, logPaymentAttempt, logSecurityEvent } = require('./logger');
+const { validateImageUrl, validateLinkUrl } = require('./urlSanitizer');
 
 const app = express();
 app.use(cors());
@@ -33,25 +35,6 @@ function parseEtherToWei(ethStr) {
   const [whole, frac = ''] = s.split('.');
   const fracPadded = (frac + '0'.repeat(18)).slice(0, 18);
   return BigInt(whole + fracPadded);
-}
-
-function isPrivateIpv4(ip) {
-  if (!ip) return false;
-  if (ip.startsWith('10.') || ip.startsWith('127.') || ip.startsWith('169.254.') || ip.startsWith('192.168.')) return true;
-  if (ip.startsWith('172.')) {
-    const second = Number(ip.split('.')[1]);
-    return second >= 16 && second <= 31;
-  }
-  return false;
-}
-
-function isPrivateIp(ip) {
-  if (!ip) return false;
-  if (ip.includes(':')) {
-    if (ip === '::1' || ip.startsWith('fc') || ip.startsWith('fe80')) return true;
-    return false;
-  }
-  return isPrivateIpv4(ip);
 }
 
 async function releaseExpiredReservation(reservationToken) {
@@ -102,50 +85,99 @@ app.get('/api/pixel', async (req, res) => {
 app.post('/api/checkout', async (req, res) => {
   try {
     const { selectedPixels, imageUrl, linkUrl } = req.body || {};
+    
+    // Extract client IP
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+                     req.connection.remoteAddress || 
+                     req.socket.remoteAddress || 
+                     'unknown';
+
+    // Validate pixel selection
     if (!Array.isArray(selectedPixels) || selectedPixels.length < 100) {
+      logger.warn('Checkout validation failed: minimum order size not met', {
+        ip: clientIp,
+        pixelCount: selectedPixels?.length || 0,
+      });
       return res.status(400).json({ error: 'Minimum order size is 100 pixels' });
     }
 
-    if (!imageUrl || !linkUrl) return res.status(400).json({ error: 'Missing image or link' });
+    // Validate URLs are provided
+    if (!imageUrl || !linkUrl) {
+      logger.warn('Checkout validation failed: missing URLs', {
+        ip: clientIp,
+        hasImageUrl: !!imageUrl,
+        hasLinkUrl: !!linkUrl,
+      });
+      return res.status(400).json({ error: 'Missing image or link' });
+    }
 
+    // Validate link URL
+    const linkValidation = await validateLinkUrl(linkUrl);
+    if (!linkValidation.valid) {
+      logSecurityEvent('invalid_link_url', {
+        reason: linkValidation.error,
+        ip: clientIp,
+        url: linkUrl.substring(0, 100), // Log first 100 chars for debugging
+      });
+      logger.warn('Checkout validation failed: invalid link URL', {
+        reason: linkValidation.error,
+        ip: clientIp,
+      });
+      return res.status(400).json({ error: linkValidation.error });
+    }
+
+    // Validate image URL
+    const imageValidation = await validateImageUrl(imageUrl);
+    if (!imageValidation.valid) {
+      logSecurityEvent('invalid_image_url', {
+        reason: imageValidation.error,
+        ip: clientIp,
+        url: imageUrl.substring(0, 100), // Log first 100 chars for debugging
+      });
+      logger.warn('Checkout validation failed: invalid image URL', {
+        reason: imageValidation.error,
+        ip: clientIp,
+      });
+      return res.status(400).json({ error: imageValidation.error });
+    }
+
+    // Additional validation: fetch image metadata to ensure it's a valid image
     try {
-      const parsed = new URL(linkUrl);
-      if (!['http:', 'https:'].includes(parsed.protocol)) return res.status(400).json({ error: 'Invalid link protocol' });
+      const head = await fetch(imageUrl, { method: 'HEAD', redirect: 'follow', timeout: 5000 });
+      if (!head.ok) {
+        logger.warn('Image URL not accessible', {
+          ip: clientIp,
+          status: head.status,
+        });
+        return res.status(400).json({ error: 'Image not fetchable' });
+      }
+      
+      const contentType = head.headers.get('content-type') || '';
+      if (!contentType.startsWith('image/')) {
+        logger.warn('URL does not point to image', {
+          ip: clientIp,
+          contentType,
+        });
+        return res.status(400).json({ error: 'Image URL does not point to an image' });
+      }
+      
+      const contentLength = head.headers.get('content-length');
+      if (contentLength && Number(contentLength) > 2 * 1024 * 1024) {
+        logger.warn('Image too large', {
+          ip: clientIp,
+          size: contentLength,
+        });
+        return res.status(400).json({ error: 'Image too large' });
+      }
     } catch (e) {
-      return res.status(400).json({ error: 'Invalid link URL' });
+      logger.warn('Unable to fetch image metadata', {
+        ip: clientIp,
+        error: e.message,
+      });
+      return res.status(400).json({ error: 'Unable to fetch image metadata' });
     }
 
-    if (!imageUrl.startsWith('data:')) {
-      let parsed;
-      try {
-        parsed = new URL(imageUrl);
-      } catch (e) {
-        return res.status(400).json({ error: 'Invalid image URL' });
-      }
-
-      const path = parsed.pathname.toLowerCase();
-      const allowed = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
-      if (!allowed.some((ext) => path.endsWith(ext))) return res.status(400).json({ error: 'Disallowed image extension' });
-
-      try {
-        const addrs = await dns.lookup(parsed.hostname, { all: true });
-        if (addrs.some((a) => isPrivateIp(a.address))) return res.status(400).json({ error: 'Image host resolves to private IP' });
-      } catch (e) {
-        return res.status(400).json({ error: 'Unable to resolve image host' });
-      }
-
-      try {
-        const head = await fetch(imageUrl, { method: 'HEAD', redirect: 'follow', timeout: 5000 });
-        if (!head.ok) return res.status(400).json({ error: 'Image not fetchable' });
-        const ct = head.headers.get('content-type') || '';
-        if (!ct.startsWith('image/')) return res.status(400).json({ error: 'Image URL does not point to an image' });
-        const len = head.headers.get('content-length');
-        if (len && Number(len) > 2 * 1024 * 1024) return res.status(400).json({ error: 'Image too large' });
-      } catch (e) {
-        return res.status(400).json({ error: 'Unable to fetch image metadata' });
-      }
-    }
-
+    // Calculate pricing and create reservation
     const pricePerPixelWei = parseEtherToWei(PRICE_PER_PIXEL_ETH);
     const totalWei = pricePerPixelWei * BigInt(selectedPixels.length);
     const expectedTotalWei = totalWei.toString();
@@ -162,7 +194,10 @@ app.post('/api/checkout', async (req, res) => {
     ]);
 
     if (reserveErr) {
-      console.error('Reservation creation failed:', reserveErr);
+      logger.error('Reservation creation failed', {
+        error: reserveErr.message,
+        ip: clientIp,
+      });
       return res.status(500).json({ error: 'Unable to create reservation' });
     }
 
@@ -177,14 +212,39 @@ app.post('/api/checkout', async (req, res) => {
 
     const { error: insertErr } = await supabase.from('pixels').insert(rows);
     if (insertErr) {
-      console.error('Reserve failed:', insertErr);
+      logger.error('Pixel reservation insertion failed', {
+        error: insertErr.message,
+        ip: clientIp,
+        pixelCount: selectedPixels.length,
+      });
       await supabase.from('pixels_reservations').delete().eq('reservation_token', reservationToken);
       return res.status(409).json({ error: 'Some pixels are already taken' });
     }
 
-    return res.json({ expectedTotalWei, priceWei: totalWei.toString(), paymentReceiver: PAYMENT_RECEIVER, reservationToken, reserveToken: reservationToken });
+    logger.info('Checkout completed successfully', {
+      reservationToken,
+      pixelCount: selectedPixels.length,
+      totalWei: totalWei.toString(),
+      ip: clientIp,
+    });
+
+    return res.json({
+      expectedTotalWei,
+      priceWei: totalWei.toString(),
+      paymentReceiver: PAYMENT_RECEIVER,
+      reservationToken,
+      reserveToken: reservationToken,
+    });
   } catch (err) {
-    console.error(err);
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+                     req.connection.remoteAddress || 
+                     req.socket.remoteAddress || 
+                     'unknown';
+    logger.error('Unexpected error in /api/checkout', {
+      error: err.message,
+      stack: err.stack,
+      ip: clientIp,
+    });
     return res.status(500).json({ error: 'Server error' });
   }
 });
@@ -193,8 +253,24 @@ app.post('/api/verify', async (req, res) => {
   try {
     const { txHash } = req.body || {};
     const reservationToken = req.body?.reservationToken || req.body?.reserveToken;
-    if (!txHash || !reservationToken) return res.status(400).json({ error: 'Missing txHash or reservation token' });
-// Replay attack protection: Check if this transaction hash has already been used
+    
+    // Extract client IP from request
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+                     req.connection.remoteAddress || 
+                     req.socket.remoteAddress || 
+                     'unknown';
+    
+    // Validate inputs
+    if (!txHash || !reservationToken) {
+      logPaymentAttempt(txHash || 'unknown', 'failure', {
+        reason: 'Missing txHash or reservation token',
+        ip: clientIp,
+        reservationToken: reservationToken || 'unknown',
+      });
+      return res.status(400).json({ error: 'Missing txHash or reservation token' });
+    }
+
+    // Replay attack protection: Check if this transaction hash has already been used
     const { data: usedTx, error: usedTxErr } = await supabase
       .from('used_transactions')
       .select('*')
@@ -202,12 +278,27 @@ app.post('/api/verify', async (req, res) => {
       .maybeSingle();
 
     if (usedTxErr) {
-      console.error('Used transactions lookup failed:', usedTxErr);
+      logger.error('Used transactions lookup failed', {
+        txHash,
+        reservationToken,
+        error: usedTxErr.message,
+        ip: clientIp,
+      });
       return res.status(500).json({ error: 'DB error' });
     }
 
     if (usedTx) {
-      console.warn(`Replay attack detected: Transaction ${txHash} has already been used`);
+      logSecurityEvent('replay_attack_detected', {
+        txHash,
+        reservationToken,
+        ip: clientIp,
+        previousVerification: usedTx.verified_at,
+      });
+      logPaymentAttempt(txHash, 'failure', {
+        reason: 'Replay attack - transaction already used',
+        ip: clientIp,
+        reservationToken,
+      });
       return res.status(400).json({ error: 'Transaction has already been used' });
     }
 
@@ -218,30 +309,75 @@ app.post('/api/verify', async (req, res) => {
       .maybeSingle();
 
     if (reservationErr) {
-      console.error('Reservation lookup failed:', reservationErr);
+      logger.error('Reservation lookup failed', {
+        txHash,
+        reservationToken,
+        error: reservationErr.message,
+        ip: clientIp,
+      });
       return res.status(500).json({ error: 'DB error' });
     }
 
     if (!reservation) {
+      logPaymentAttempt(txHash, 'failure', {
+        reason: 'Reservation not found',
+        ip: clientIp,
+        reservationToken,
+      });
       return res.status(404).json({ error: 'Reservation not found' });
     }
 
     if (reservation.status !== 'pending') {
+      logSecurityEvent('non_pending_reservation_attempt', {
+        txHash,
+        reservationToken,
+        ip: clientIp,
+        currentStatus: reservation.status,
+      });
+      logPaymentAttempt(txHash, 'failure', {
+        reason: `Reservation is not pending (status: ${reservation.status})`,
+        ip: clientIp,
+        reservationToken,
+      });
       return res.status(400).json({ error: 'Reservation is not pending' });
     }
 
     const now = new Date();
     const expiresAt = new Date(reservation.expires_at);
     if (now > expiresAt) {
+      logSecurityEvent('expired_reservation_attempt', {
+        txHash,
+        reservationToken,
+        ip: clientIp,
+        expiresAt: reservation.expires_at,
+      });
+      logPaymentAttempt(txHash, 'failure', {
+        reason: 'Reservation expired',
+        ip: clientIp,
+        reservationToken,
+      });
       await releaseExpiredReservation(reservationToken);
       return res.status(400).json({ error: 'Reservation expired' });
     }
 
     const tx = await provider.getTransaction(txHash);
     const receipt = await provider.getTransactionReceipt(txHash);
-    if (!tx || !receipt) return res.status(400).json({ error: 'Transaction not found or not mined yet' });
+    if (!tx || !receipt) {
+      logPaymentAttempt(txHash, 'failure', {
+        reason: 'Transaction not found or not mined yet',
+        ip: clientIp,
+        reservationToken,
+      });
+      return res.status(400).json({ error: 'Transaction not found or not mined yet' });
+    }
+    
     if (receipt.status !== 1) {
-      console.warn(`Transaction ${txHash} failed for reservation ${reservationToken}`);
+      logPaymentAttempt(txHash, 'failure', {
+        reason: 'Transaction failed',
+        ip: clientIp,
+        reservationToken,
+        txStatus: receipt.status,
+      });
       return res.status(400).json({ error: 'Transaction failed' });
     }
 
@@ -249,37 +385,96 @@ app.post('/api/verify', async (req, res) => {
     const network = await provider.getNetwork();
     const expectedChainId = Number(BASE_CHAIN_ID);
     if (network.chainId !== expectedChainId) {
-      console.warn(`Chain ID mismatch for transaction ${txHash}: expected ${expectedChainId}, got ${network.chainId}`);
+      logSecurityEvent('chain_id_mismatch', {
+        txHash,
+        reservationToken,
+        ip: clientIp,
+        expectedChainId,
+        actualChainId: network.chainId,
+      });
+      logPaymentAttempt(txHash, 'failure', {
+        reason: `Chain ID mismatch (expected ${expectedChainId}, got ${network.chainId})`,
+        ip: clientIp,
+        reservationToken,
+        expectedChainId,
+        actualChainId: network.chainId,
+      });
       return res.status(400).json({ error: 'Transaction is not on the correct chain' });
     }
 
     const txValue = BigInt(tx.value.toString());
     const expectedValue = BigInt(reservation.expected_total_wei);
     if (txValue !== expectedValue) {
-      console.warn(`Payment mismatch for reservation ${reservationToken}: expected ${expectedValue}, got ${txValue}`);
+      logSecurityEvent('payment_amount_mismatch', {
+        txHash,
+        reservationToken,
+        ip: clientIp,
+        expectedValue: expectedValue.toString(),
+        actualValue: txValue.toString(),
+      });
+      logPaymentAttempt(txHash, 'failure', {
+        reason: `Amount mismatch (expected ${expectedValue}, got ${txValue})`,
+        ip: clientIp,
+        reservationToken,
+        expectedValue: expectedValue.toString(),
+        value: txValue.toString(),
+        chainId: network.chainId,
+      });
       return res.status(400).json({ error: 'Amount must match reservation exactly' });
     }
 
     if (!PAYMENT_RECEIVER) {
-      console.error('Server missing PAYMENT_RECEIVER');
+      logger.error('Server missing PAYMENT_RECEIVER configuration', { txHash, reservationToken, ip: clientIp });
       return res.status(500).json({ error: 'Server misconfigured' });
     }
 
     if (!tx.to || tx.to.toLowerCase() !== PAYMENT_RECEIVER.toLowerCase()) {
-      console.warn(`Payment receiver mismatch for reservation ${reservationToken}: expected ${PAYMENT_RECEIVER}, got ${tx.to}`);
+      logSecurityEvent('payment_receiver_mismatch', {
+        txHash,
+        reservationToken,
+        ip: clientIp,
+        expectedReceiver: PAYMENT_RECEIVER,
+        actualReceiver: tx.to,
+      });
+      logPaymentAttempt(txHash, 'failure', {
+        reason: `Payment receiver mismatch (expected ${PAYMENT_RECEIVER}, got ${tx.to})`,
+        ip: clientIp,
+        reservationToken,
+        value: txValue.toString(),
+        chainId: network.chainId,
+      });
       return res.status(400).json({ error: 'Payment receiver mismatch' });
     }
 
     const block = await provider.getBlock(receipt.blockNumber);
     if (!block) {
-      console.error(`Unable to fetch block ${receipt.blockNumber} for tx ${txHash}`);
+      logger.error('Unable to fetch block for transaction', {
+        txHash,
+        reservationToken,
+        blockNumber: receipt.blockNumber,
+        ip: clientIp,
+      });
       return res.status(500).json({ error: 'Blockchain verification failed' });
     }
 
     const txTimestamp = new Date(block.timestamp * 1000);
     const createdAt = new Date(reservation.created_at);
     if (txTimestamp < createdAt || txTimestamp > expiresAt) {
-      console.warn(`Transaction timestamp outside reservation window for ${reservationToken}: created ${createdAt.toISOString()}, tx ${txTimestamp.toISOString()}, expires ${expiresAt.toISOString()}`);
+      logSecurityEvent('transaction_timestamp_mismatch', {
+        txHash,
+        reservationToken,
+        ip: clientIp,
+        createdAt: createdAt.toISOString(),
+        txTimestamp: txTimestamp.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+      });
+      logPaymentAttempt(txHash, 'failure', {
+        reason: 'Transaction timestamp outside reservation window',
+        ip: clientIp,
+        reservationToken,
+        value: txValue.toString(),
+        chainId: network.chainId,
+      });
       return res.status(400).json({ error: 'Transaction not valid for this reservation' });
     }
 
@@ -295,9 +490,14 @@ app.post('/api/verify', async (req, res) => {
       ]);
 
     if (storeErr) {
-      console.error('Failed to store used transaction hash:', storeErr);
-      return res.status(500).json({ error: 'Failed to store transaction recordToken}: created ${createdAt.toISOString()}, tx ${txTimestamp.toISOString()}, expires ${expiresAt.toISOString()}`);
-      return res.status(400).json({ error: 'Transaction not valid for this reservation' });
+      logger.error('Failed to store used transaction hash', {
+        txHash,
+        reservationToken,
+        chainId: network.chainId,
+        error: storeErr.message,
+        ip: clientIp,
+      });
+      return res.status(500).json({ error: 'Failed to store transaction record' });
     }
 
     const { error: updateErr } = await supabase
@@ -307,7 +507,12 @@ app.post('/api/verify', async (req, res) => {
       .eq('tx_hash', `RESERVED:${reservationToken}`);
 
     if (updateErr) {
-      console.error('Finalizing claim failed:', updateErr);
+      logger.error('Finalizing claim failed', {
+        txHash,
+        reservationToken,
+        error: updateErr.message,
+        ip: clientIp,
+      });
       return res.status(500).json({ error: 'Finalizing claim failed' });
     }
 
@@ -317,12 +522,44 @@ app.post('/api/verify', async (req, res) => {
       .eq('reservation_token', reservationToken);
 
     if (statusErr) {
-      console.error('Failed to mark reservation completed:', statusErr);
+      logger.error('Failed to mark reservation completed', {
+        txHash,
+        reservationToken,
+        error: statusErr.message,
+        ip: clientIp,
+      });
     }
+
+    // Log successful verification
+    logPaymentAttempt(txHash, 'success', {
+      reason: 'Payment verified and pixels reserved',
+      ip: clientIp,
+      reservationToken,
+      value: txValue.toString(),
+      chainId: network.chainId,
+    });
+
+    logger.info('Payment verification completed successfully', {
+      txHash,
+      reservationToken,
+      chainId: network.chainId,
+      value: txValue.toString(),
+      ip: clientIp,
+    });
 
     return res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+                     req.connection.remoteAddress || 
+                     req.socket.remoteAddress || 
+                     'unknown';
+    logger.error('Unexpected error in /api/verify', {
+      error: err.message,
+      stack: err.stack,
+      txHash: req.body?.txHash || 'unknown',
+      reservationToken: req.body?.reservationToken || req.body?.reserveToken || 'unknown',
+      ip: clientIp,
+    });
     return res.status(500).json({ error: 'Server error' });
   }
 });
