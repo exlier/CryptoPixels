@@ -1,7 +1,9 @@
+/* ─── Reset ─────────────────────────────────────────────────────────────────── */
 * {
     box-sizing: border-box;
 }
 
+/* ─── Base ───────────────────────────────────────────────────────────────────── */
 body {
     margin: 0;
     min-height: 100vh;
@@ -11,6 +13,7 @@ body {
     text-align: center;
 }
 
+/* ─── Header ─────────────────────────────────────────────────────────────────── */
 header {
     padding: 24px 20px;
     background: #1e293b;
@@ -30,6 +33,7 @@ h1 {
     line-height: 1.5;
 }
 
+/* ─── Canvas ─────────────────────────────────────────────────────────────────── */
 #canvas-container {
     width: min(100%, 1000px);
     margin: 30px auto;
@@ -44,9 +48,30 @@ canvas {
     display: block;
     box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
     cursor: crosshair;
+    /* FIX #49: Prevent browser scroll/pan on touch — pointer events handle drag */
     touch-action: none;
 }
 
+/* FIX #47: Loading spinner overlay */
+#grid-spinner {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(15, 23, 42, 0.7);
+    border-radius: 4px;
+    color: #38bdf8;
+    font-size: 1rem;
+    letter-spacing: 0.05em;
+    pointer-events: none;
+}
+
+#grid-spinner::after {
+    content: 'Loading pixels…';
+}
+
+/* ─── Modal ──────────────────────────────────────────────────────────────────── */
 .modal,
 .toast {
     font-family: inherit;
@@ -85,6 +110,14 @@ canvas {
     border: 1px solid #475569;
     color: #fff;
     border-radius: 8px;
+    font-size: 1rem;
+}
+
+/* FIX #43: Visible focus ring on all focusable elements */
+.modal input:focus,
+.modal button:focus-visible {
+    outline: 2px solid #38bdf8;
+    outline-offset: 2px;
 }
 
 .modal button {
@@ -107,9 +140,12 @@ canvas {
 
 .modal button:disabled {
     background: #475569;
+    color: #94a3b8;
     cursor: not-allowed;
+    /* FIX #43: keep focus ring visible even when disabled */
 }
 
+/* ─── Overlay ────────────────────────────────────────────────────────────────── */
 .overlay {
     display: none;
     position: fixed;
@@ -118,6 +154,7 @@ canvas {
     z-index: 50;
 }
 
+/* ─── Toast ──────────────────────────────────────────────────────────────────── */
 .toast {
     position: fixed;
     bottom: 22px;
@@ -150,38 +187,34 @@ canvas {
     display: none !important;
 }
 
-@media (max-width: 640px) {
-    header {
-        padding: 18px 16px;
-    }
-    .stats {
-        font-size: 0.95rem;
-    }
-}
-
+/* ─── Trust card ─────────────────────────────────────────────────────────────── */
 .trust-card {
     width: min(100%, 1000px);
     margin: 22px auto;
-    background: rgba(2,6,23,0.6);
-    border: 1px solid rgba(56,189,248,0.12);
+    background: rgba(2, 6, 23, 0.6);
+    border: 1px solid rgba(56, 189, 248, 0.12);
     padding: 18px;
     border-radius: 12px;
     color: #e6eef8;
 }
+
 .trust-card h2 {
     margin: 0 0 12px 0;
     color: #38bdf8;
     font-size: 1.15rem;
 }
+
 .trust-columns {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 16px;
 }
+
 .trust-column h4 {
     margin: 0 0 8px 0;
     color: #c7f9ff;
 }
+
 .trust-column p,
 .trust-column ol {
     margin: 0;
@@ -191,14 +224,23 @@ canvas {
     line-height: 1.45;
 }
 
-/* Small screens: stack columns */
+.selection-summary {
+    color: #cbd5e1;
+    margin-top: 8px;
+}
+
+/* ─── Responsive ─────────────────────────────────────────────────────────────── */
 @media (max-width: 720px) {
     .trust-columns {
         grid-template-columns: 1fr;
     }
 }
 
-.selection-summary {
-    color: #cbd5e1;
-    margin-top: 8px;
+@media (max-width: 640px) {
+    header {
+        padding: 18px 16px;
+    }
+    .stats {
+        font-size: 0.95rem;
+    }
 }

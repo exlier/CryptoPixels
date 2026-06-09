@@ -4,8 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crypto Million Dollar Homepage</title>
-    <!-- Content Security Policy: only allow resources from same origin and safe image sources -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline';">
+    <!-- Bug #48: Added Content Security Policy -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self';
+                   script-src 'self' https://cdn.jsdelivr.net;
+                   style-src 'self' 'unsafe-inline';
+                   img-src 'self' https: data:;
+                   connect-src 'self' https://*.supabase.co https://mainnet.base.org;
+                   frame-ancestors 'none';">
     <link rel="stylesheet" href="./src/styles.css">
 </head>
 <body>
@@ -15,7 +21,7 @@
     </header>
 
     <div class="trust-card">
-        <h2>🛡️ Why Trust Us & How to Buy</h2>
+        <h2>🛡️ Why Trust Us &amp; How to Buy</h2>
         <div class="trust-columns">
             <div class="trust-column">
                 <h4>Trust</h4>
@@ -33,24 +39,42 @@
     </div>
 
     <div id="canvas-container">
-        <canvas id="gridCanvas" width="1000" height="1000" aria-label="Pixel purchase canvas"></canvas>
+        <!-- Bug #29: Added role and description for screen readers -->
+        <canvas id="gridCanvas" width="1000" height="1000"
+                role="img"
+                aria-label="Pixel purchase canvas — drag to select pixels for purchase, double-click a pixel to visit its link">
+        </canvas>
+        <!-- Bug #29: Accessible live region for purchase events -->
+        <div id="a11y-announce" aria-live="polite" aria-atomic="true"
+             style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;"></div>
     </div>
 
     <div class="overlay" id="overlay"></div>
 
-    <div class="modal" id="buyModal">
-        <h3>Buy Pixel Block</h3>
+    <div class="modal" id="buyModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <h3 id="modalTitle">Buy Pixel Block</h3>
         <p id="blockCoords">Selected Pixels: 0</p>
         <p class="selection-summary">Selected: <span id="pixelCount">0</span> pixels | Total: <strong id="totalPrice">0 ETH</strong></p>
         <p style="margin-top:6px; color:#94a3b8;">Price per pixel: <strong>0.001 ETH</strong></p>
-        <input type="text" id="imgUrl" placeholder="10x10 Image Link (HTTPS PNG/JPG)" autocomplete="off">
-        <input type="text" id="linkUrl" placeholder="Your Website Link (https://...)" autocomplete="off">
+        <!-- Bug #45: Fixed placeholder to not say "10x10" since multi-pixel blocks are supported -->
+        <input type="url" id="imgUrl" placeholder="Image URL (HTTPS, PNG/JPG/GIF/WEBP/SVG)" autocomplete="off" aria-label="Image URL">
+        <input type="url" id="linkUrl" placeholder="Your Website Link (https://...)" autocomplete="off" aria-label="Target website URL">
         <button id="payBtn" type="button">Pay with Crypto Wallet</button>
     </div>
 
-    <div class="toast hidden" id="toast"></div>
+    <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
 
-    <!-- External crypto/db libraries moved to server-side. Client uses a small module only. -->
+    <!--
+        Bug #22: Added Subresource Integrity (SRI) hashes to prevent CDN supply-chain attacks.
+        These hashes pin the exact bytes of each script. If the CDN serves tampered code the
+        browser will refuse to execute it and log a console error.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.35.0/dist/umd/supabase.js"
+            crossorigin="anonymous"
+            integrity="sha256-tFmFJdpxXGBnbE0OL0MHMxJMIarRNxGmgUKjHzN0YxY="></script>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"
+            crossorigin="anonymous"
+            integrity="sha256-stp/uYMsXMiU2A1tHnmRTD2JimTxVJiQ04MZFqsv2FI="></script>
     <script type="module" src="./src/app.js"></script>
 </body>
 </html>
